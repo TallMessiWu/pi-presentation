@@ -4,7 +4,7 @@
 
 | 时间 | 现场要看的问题 |
 |---|---|
-| 00:00–04:00 | 用 ReAct 走一遍读文件、改文件的循环，看工具结果怎样进入下一轮。 |
+| 00:00–04:00 | 交替运行两格代码，一轮一轮看完整请求、模拟模型的原始回答和文件工具的实际回执。 |
 | 04:00–20:00 | pi 的一次工具调用，怎样从 `AgentSession` 走到本地文件，又进入下一次请求？ |
 | 20:00–34:30 | 对照 pi 读 dsh 的架构和三次请求：启动时谁装配组件，运行时谁管历史，写文件时谁检查权限？ |
 | 34:30–37:00 | 把插件放回架构图，先看规划和权限，再试加一道检查、换文件实现、换循环。 |
@@ -15,56 +15,29 @@
 
 随讲稿可以[打开六份模型请求和本地会话记录](./harness-requests.json)。正文会按消息出现的顺序把关键的 JSON 列出来。
 
-## 00:00–04:00　用 ReAct 跟一次工具调用
+## 00:00–04:00　用三轮请求手动跑一次 ReAct
 
-### 00:00　ReAct 里的动作和观察
+### 00:00　第 1 页　改一行文件要问模型几次？
 
-先说 ReAct。模型根据手头的信息选一个动作（Action），程序执行这个动作，把实际结果（Observation）放回对话。下一次问模型时，它就能依据这个结果接着做。放到编程助手里，有个很具体的问题：模型回复“我要读文件”和模型真的看到文件内容，中间是哪几行代码？[ReAct 作者的论文与示例](https://react-lm.github.io/)
+今天只改一行配置。这个例子来自 dsh 仓库的 `fs-edit` 测试，用户原话翻成中文就是“先用 read 读 config.txt，再用 edit 把 DEBUG 换成 RELEASE，最后只回 DONE”。仓库里留着改之前的文件、改之后的文件和中间的调用记录，等会儿跑 pi 和 dsh 时能一项一项对。咱们先自己当一下那个循环，发一轮就停一下。[测试文件和预期结果](https://github.com/deepseek-ai/deepseek-harness/tree/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit) · [录制里的用户原话](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L10-L25)
 
-今天就拿一条有记录可查的任务来看。DeepSeek Harness（后面简称 dsh）的仓库里有个叫 `fs-edit` 的测试案例，里面放了一份专门用来测试读写的 `config.txt`。录制里的用户指令翻成中文是：“先用 `read` 读这个文件，再用 `edit` 把 `DEBUG` 换成 `RELEASE`，不要用 bash，做完只回 `DONE`。”仓库把改之前的文件、改之后的文件，以及中间每次工具调用都留了下来。选这个例子，是因为我们可以把同一条任务交给 pi，再对着两边的记录看它们怎么跑。[测试文件和预期结果](https://github.com/deepseek-ai/deepseek-harness/tree/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit) · [用户指令和实际调用记录](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L10-L25)
+### 00:30　第 2 页　先备好工具和一段空白会话
 
-今天用同一次文件修改看两种做助手的办法。pi 先给我一个能用的循环，我沿着它找地方加功能。dsh 先读配置，把这一趟要用的循环、会话和工具服务装起来。等会儿看到同一个 edit，大家可以猜一下：我要改它的行为，动哪一块？
+第一格里有两个真正干活的 Python 函数。`read` 读文件，`edit` 在文件里找到原文、改掉一处。发给模型的是另外一份工具声明，里面写名字、用途和参数。我们这边留着名字到函数的对照表，等模型报出工具名才知道去调谁。
 
-先把用户刚才那句话放进一个列表，叫 `messages`，用它记每一轮的对话。下面先看循环跑起来以后发生什么。等讲到 pi，我们再打开`ask_model`，看框架在发出第一份请求前，还替用户准备了什么。
+第二格创建一份临时文件，初始值是 `mode=DEBUG` 和 `level=info`。对话从两条消息开始，一条是演示里写的简短英文系统说明，一条是用户的完整指令。请记住第二行 `level=info`，用户一句都没提过它。模型回复由本地函数模拟，读写用的就是刚创建的文件。
 
-```text
-def react(messages):
-    while True:
-        reply = ask_model(messages)
-        messages.append(reply)
-        if not reply.tool_call:
-            return reply.text
-        observation = run_tool(reply.tool_call)
-        messages.append(tool_result(reply.tool_call.id, observation))
-```
+> **操作**　依次运行 Cell 1、2。若已执行过 Run All，上台前再运行一次 Cell 2，把历史和临时文件一起恢复到起点。
 
-第一轮，`ask_model(messages)` 返回一个工具调用：读 `config.txt`。程序把这条回复记下来，这时模型给出的是 **Action**，它手上只有文件名。往下走到 `run_tool`，本地程序才打开文件。我们停在它的返回值 `observation` 上，看看刚才说的“观察”在这个例子里到底是什么。
+### 02:00　第 3 页　我们决定什么时候进入下一轮
 
-### 02:00　跟着 read 的结果走到第二次请求
+这一页左边两格，右边共用一个结果区。点 Cell 3 看准备发出的完整请求，点 Cell 4 才揭晓回复、执行工具。每次选中代码按 **Ctrl + Enter**，我们自己控制这六次停顿。
 
-这就是 `fs-edit` 那份文件在修改前的两行正文：
+1. **第一次运行 Cell 3。** 先问“现在模型能说出文件第二行吗？”往下看得到 `tools` 里的 `read`，但 `messages` 里只有系统说明和用户任务。运行 Cell 4，模型在原始 JSON 里选了 `read`，给出文件名。跟着 `function.arguments` 看，那还是一串 JSON 字符。程序解析参数、运行本地函数，工具回执里才有那两行配置。
+2. **先猜第二份请求会多几条消息，再跑 Cell 3。** 右边停在新增的位置。一条是助手说“我要读”，一条是工具答“读到了这些”，相同的调用编号把它们对上。现在模型才看见 `level=info`。猜完它下一步要做什么，再跑 Cell 4，看 `edit` 拿到哪些参数、工具改完回了什么。
+3. **第三次运行 Cell 3 前再猜一下。** 磁盘已经改成了 `RELEASE`，先前那条 read 回执会跟着变吗？翻回去还是 `mode=DEBUG`，末尾新加的是 edit 成功的回执。运行 Cell 4，助手这次只答 `DONE`，任务到这儿结束。
 
-```ini
-mode=DEBUG
-level=info
-```
-
-第一行的 `DEBUG` 是用户要替换的值。第二行 `level=info` 要原样保留。大家留意一下，用户那句话里根本没提过 `level=info`。**如果我们在发给模型的数据里搜这串字，第一次会在哪一轮找到它？**
-
-> **投影**　指回循环末尾的 `messages.append(tool_result(...))`，再往上指到下一次 `ask_model(messages)`。
-
-答案是第二次请求。本地的 `read` 先读到了这两行，循环最后一行把读取结果和调用 ID 放进 `messages`。回到循环顶部，模型才第一次看到完整的两行配置。它接着给出 `edit`，本地工具把 `mode=DEBUG` 改成 `mode=RELEASE`，另一行仍然是 `level=info`。再走一遍循环，这回送给模型的是修改成功的结果，它便按用户要求回复 `DONE`。这一轮是纯文本，伪代码就在 `return reply.text` 退出了。
-
-<details>
-<summary>展开录制里的英文用户指令</summary>
-
-```text
-First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE.
-```
-
-</details>
-
-附录 A 可以直接运行这段过程的回放。台上我们接着看真正的 harness：在伪代码里，把工具结果送回模型只用了一行 `append`。到了 pi，谁保存这条结果，又是谁把它拼进第二次请求？
+刚才模型提出一次工具调用，是一个 action。工具真正读到或改到什么，把结果记回对话，就是下一轮可以用的 observation。我们自己按键决定什么时候再发请求。把同一句任务交给 pi 以后，谁来准备第一包，谁把回执送进第二包？现在从用户按回车开始追。[ReAct 作者的论文与示例](https://react-lm.github.io/)
 
 ## 04:00–20:00　pi：用户打的一句话，怎么变成三份请求？
 
@@ -85,7 +58,7 @@ First use the read tool to read config.txt in the current directory. Then use th
 
 为了能逐项对照，我在本机跑这版 pi，保存它在发送前准备的会话消息和交给网络层的 JSON。模型的回答用预先准备的内容回放，读写文件由 pi 真正执行。
 
-按回车以后，先接到这项任务的是本机的 pi。从源码图里的 `AgentSession` 沿着 `Agent` 和 `runLoop` 走到 `pi-ai`，才到第一次向模型发请求的位置。前面伪代码里的 `ask_model(messages)`，正好把这里的准备工作藏起来了。
+按回车以后，先接到这项任务的是本机的 pi。从源码图里的 `AgentSession` 沿着 `Agent` 和 `runLoop` 走到 `pi-ai`，才到第一次向模型发请求的位置。前面手动演示里，Cell 3 一行 `build_request(messages, tools)` 就备好了请求。换到 pi，咱们沿这条路看看准备工作具体落在哪几个模块。
 
 图 1　pi CLI 的源码架构
 
@@ -881,62 +854,37 @@ pi-memory 的正常退出流程若成功生成非空摘要，也会追加到当�
 
 这份表来自 DeepSeek 在 2026 年 9 月 17 日提交的 V4.1-Flash 技术报告。作者固定模型权重、题目和解码配置，比较各套 harness 自带的提示词、工具和循环。推理强度为 100（Max），Linux 容器、温度 1.0、top-p 0.95、1M 上下文，每个 agent 最多 500 次模型生成。DeepSWE 每题采样 8 次，Terminal-Bench 每题 3 次，终端评测断网。pi 用 v0.84.2 的 RPC 模式，加文件、shell 和搜索工具。dsh Standard 用 v0.1.1+custom.202609011522 的完整 SDK 配置，起初 26 个函数工具；Minimal 只有 bash。要判断某个钩子或工具具体贡献了多少，需要单独做消融。其他模型也要按实际配置另测。 [技术报告 §5.3.4 表 4](https://arxiv.org/html/2609.19969v1#S5.SS3.SSS4) · [附录 B.1 的评测配置](https://arxiv.org/html/2609.19969v1#A2.SS1) · [官方模型卡](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/README.md)
 
-## 附录 A　一个可运行的 ReAct 工具循环
+## 附录 A　ReAct 现场运行顺序
 
-在 Python 3 里运行下面这一格。三个模型回复取自 dsh 的 `fs-edit` 录制，Python 在临时目录里实际读写 `config.txt`。第一条简短的 `system` 由这个演示程序自己加上；`tool`、`args` 和 `call_id` 是代码为了展示名字、参数和配对号选用的教学字段。打印时可以直接看到上一次工具返回的内容。两套框架的完整请求格式见[请求附件](./harness-requests.json)。
+打开《从一个 agent 循环讲到 pi 和 dsh》的 Notebook，第 2 页先运行 Cell 1 定义工具、模拟模型和回复解析函数，再运行 Cell 2 准备会话与临时文件。想重新讲一遍，只要重跑 Cell 2。[可执行 Notebook](./从一个-agent-循环讲到-pi-和-dsh.ipynb)
+
+想和后面的 pi、dsh 录制对照，可以在第一份请求的 `user` 消息里找到完整原话。
+
+> First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE.
+
+第 3 页的 Cell 3 只做两件事。把当前的消息历史与工具声明组装成请求，在右边显示它的完整正文。同一轮可以多看几次。
 
 ```python
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
-
-TASK = "First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE."
-INITIAL = "mode=DEBUG\nlevel=info\n"
-EXPECTED = "mode=RELEASE\nlevel=info\n"
-RECORDED = [
-    {"role": "assistant", "id": "fs-edit-read", "tool": "read",
-     "args": {"file_path": "config.txt"}},
-    {"role": "assistant", "id": "fs-edit-replace", "tool": "edit",
-     "args": {"file_path": "config.txt", "old_string": "DEBUG", "new_string": "RELEASE"}},
-    {"role": "assistant", "content": "DONE"},
-]
-
-def initial_messages():
-    return [
-        {"role": "system", "content": "You can use read and edit."},
-        {"role": "user", "content": TASK},
-    ]
-
-def local_tool(folder, name, args):
-    if args["file_path"] != "config.txt":
-        raise ValueError("演示只操作临时目录里的 config.txt")
-    path = Path(folder) / args["file_path"]
-    content = path.read_text(encoding="utf-8")
-    if name == "read":
-        return content
-    if name != "edit" or content.count(args["old_string"]) != 1:
-        raise ValueError("请检查工具名和要替换的原文")
-    path.write_text(content.replace(args["old_string"], args["new_string"]), encoding="utf-8")
-    return "config.txt 已修改"
-
-def run_loop(folder, messages, replies):
-    for reply in replies:  # 回放下一条已录制的模型回复
-        print("\n本次请求 messages =", json.dumps(messages, ensure_ascii=False))
-        print("模型回复 =", json.dumps(reply, ensure_ascii=False))
-        messages.append(reply)
-        if "tool" not in reply:
-            return reply["content"]
-        result = local_tool(folder, reply["tool"], reply["args"])
-        messages.append({"role": "tool", "call_id": reply["id"], "content": result})
-    raise RuntimeError("回放已用完，仍未收到预期回复")
-
-with TemporaryDirectory() as folder:
-    path = Path(folder) / "config.txt"
-    path.write_text(INITIAL, encoding="utf-8")
-    final = run_loop(folder, initial_messages(), RECORDED)
-    assert final == "DONE" and path.read_text(encoding="utf-8") == EXPECTED
-    print("\n磁盘上的 config.txt\n" + path.read_text(encoding="utf-8"))
+request = build_request(messages, tools)
+show_request(request)
 ```
+
+等大家猜完，再执行下面的 Cell 4。模拟服务返回的原始 JSON 留在 `raw`，解析出来的助手消息留在 `reply`。程序把助手的调用和工具回执两条消息追加到历史。下一次再跑 Cell 3，这两条就会一起出现。模型答 `DONE` 这一轮没有工具需要执行。
+
+```python
+raw = mock_llm(request)
+reply = parse_assistant_message(raw)
+results = execute_tool_calls(reply, executors)
+record_and_show_turn(messages, reply, results, raw=raw)
+```
+
+两格依次各跑三次。可以用下表检查当前停在了哪一轮。
+
+| 运行 Cell 3 时的历史条数 | 请求发出前，最后一条消息来自谁 | 运行 Cell 4 后看到的模拟模型回复 |
+| --- | --- | --- |
+| 2 | 用户交代读文件、改配置、回 DONE | 要求 `read` |
+| 4 | 文件工具读出 `mode=DEBUG` 和 `level=info` | 要求 `edit` |
+| 6 | 文件工具确认成功替换 | 最终文字 `DONE` |
 
 ## 附录 B　同一个 `read_config` 的两个注册入口（供会后查阅）
 
@@ -1022,4 +970,4 @@ uv sync --locked
 uv run --locked jupyter lab
 ```
 
-项目用 `uv.lock` 固定依赖，Python 3.11 内核可以运行附录 A，不需要模型密钥。Notebook 放映使用 JupyterLab RISE，进入放映后仍可执行当前单元格。交互图可以嵌入可信单元格的 HTML 输出。放映时按图里的“上一步 / 下一步”切换高亮箭头和解释，幻灯片导航用于翻页。[RISE 用法](https://jupyterlab-contrib.github.io/rise.html)
+项目用 `uv.lock` 固定依赖，Python 3.11 内核可以运行附录 A 对应的四个 Notebook 单元格，无需模型密钥。Notebook 放映使用 JupyterLab RISE，进入放映后仍可执行当前单元格。交互图可以嵌入可信单元格的 HTML 输出。放映时按图里的“上一步 / 下一步”切换高亮箭头和解释，幻灯片导航用于翻页。[RISE 用法](https://jupyterlab-contrib.github.io/rise.html)

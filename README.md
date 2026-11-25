@@ -19,7 +19,13 @@ uv run --locked jupyter trust '从一个-agent-循环讲到-pi-和-dsh.ipynb'
 uv run --locked jupyter lab '从一个-agent-循环讲到-pi-和-dsh.ipynb'
 ```
 
-在 JupyterLab 里按 **Option+R**（Windows / Linux 用 **Alt+R**）进入放映。左右方向键翻页，图内的“下一步”沿请求逐步高亮。第 3 页可以重新执行，会在临时目录里真正读写示例文件。
+在 JupyterLab 里按 **Option+R**（Windows / Linux 用 **Alt+R**）进入放映。左右方向键翻页，图内的“下一步”沿请求逐步高亮。
+
+**手动跑 ReAct（开场 4 分钟）**
+
+1. 第 2 页依次运行 Cell 1、2，定义工具，创建临时 `config.txt` 并初始化会话。如果先执行过 Run All，上台前重跑 Cell 2 就能从头来。
+2. 第 3 页左边有两格代码，右边共用一个高输出区。选中 Cell 3，按 **Ctrl + Enter** 查看本轮完整请求。等大家猜完，再对 Cell 4 按 **Ctrl + Enter**，看模拟模型返回的原始 JSON 和本机的工具回执。
+3. 留在这一页，重复 Cell 3、4，依次走完读文件、改文件、回 `DONE`。长 JSON 在右侧上下滚动。第二、三轮会定位到新加进历史的消息。
 
 ## 对照源码
 
