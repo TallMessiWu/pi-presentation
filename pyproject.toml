@@ -1,0 +1,10 @@
+[project]
+name = "pi-presentation"
+version = "0.1.0"
+description = "Notebook environment for the pi and dsh agent harness talk"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "ipykernel>=6",
+    "jupyterlab>=4.1,<5",
+    "jupyterlab-rise>=0.42,<1",
+]

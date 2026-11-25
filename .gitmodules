@@ -1,0 +1,6 @@
+[submodule "pi"]
+	path = pi
+	url = https://github.com/earendil-works/pi.git
+[submodule "deepseek-harness"]
+	path = deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
