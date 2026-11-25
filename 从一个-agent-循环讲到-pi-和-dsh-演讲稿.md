@@ -2,90 +2,64 @@
 
 **40 分钟 · AI 工程师部门分享**
 
-| 时间 | 现场要看的问题 |
+| 时间 | 要解决的问题 |
 |---|---|
-| 00:00–04:00 | 用 ReAct 走一遍读文件、改文件的循环，看工具结果怎样进入下一轮。 |
-| 04:00–20:00 | pi 的一次工具调用，怎样从 `AgentSession` 走到本地文件，又进入下一次请求？ |
-| 20:00–34:30 | 对照 pi 读 dsh 的架构和三次请求：启动时谁装配组件，运行时谁管历史，写文件时谁检查权限？ |
-| 34:30–37:00 | 把插件放回架构图，先看规划和权限，再试加一道检查、换文件实现、换循环。 |
-| 37:00–38:00 | 三种记忆插件把同一句约定存到哪里，新会话怎样取回，各有什么代价？ |
-| 38:00–40:00 | 按团队需求、模型接入方式和同模型实测，决定先试 pi 还是 dsh。 |
+| 00:00–06:00 | 同一句 CI 诊断，为什么有时得去读日志，有时可以直接结束？现场跑 ReAct 的两个分支。 |
+| 06:00–20:00 | 先认 pi 的源码结构，连看三份 JSON，再沿时序图回看。最后试一次：模型读完以后，磁盘上的文件被人改了。 |
+| 20:00–34:30 | 换到 dsh，看组件怎么装、历史怎么记。三份 JSON 看全，再动手换工具执行器，看两次有依赖的读取中间是否还要再问模型。 |
+| 34:30–37:00 | 在工具清单、执行检查和文件服务这几个位置接插件，各能改变什么？ |
+| 37:00–38:00 | 三种记忆插件把同一句约定写在哪里，新会话怎样取回来？ |
+| 38:00–40:00 | 拿团队要干的活、准备接的模型和同模型评测，一起比较两套 harness。 |
 
-> **讲者用**　等宽字体是投影时值得指的字段或函数。系统提示、工具参数和结果保留英文；旁边的中文是讲解。长代码藏在附录，正文的源码链接对应本地检出的版本，pi `8209929`，dsh `4b399c3`。图中节点和下文代码相对应。
+现场代码在第 2、3、10、19 页。第 6–8 页和第 14–16 页分别保留 pi、dsh 正常读改任务的三份请求，可以快速翻看，也可以随时切换「本地组装」「发给模型」「模型回复」。长 JSON 和源码入口留在文中供细看。观众提问另算。 [完整请求和本地会话记录](./harness-requests.json)
 
-随讲稿可以[打开六份模型请求和本地会话记录](./harness-requests.json)。正文会按消息出现的顺序把关键的 JSON 列出来。
+## 00:00–06:00　从一次 CI 失败看 ReAct
 
-## 00:00–04:00　用 ReAct 跟一次工具调用
+### 00:00　第 1 页　工具调用中间，harness 干了什么？
 
-### 00:00　ReAct 里的动作和观察
+平时我让助手查个问题，过一会儿它就回我一句“查到了”。中间到底是谁去拿的数据？它怎么知道还该不该再调用一次工具？
 
-先说 ReAct。模型根据手头的信息选一个动作（Action），程序执行这个动作，把实际结果（Observation）放回对话。下一次问模型时，它就能依据这个结果接着做。放到编程助手里，有个很具体的问题：模型回复“我要读文件”和模型真的看到文件内容，中间是哪几行代码？[ReAct 作者的论文与示例](https://react-lm.github.io/)
+我之前写过一个分析 GitHub 仓库的 Notebook。模型先看到有哪些工具，给出工具名和参数，Python 在本机把这个名字对应到函数，再把结果交回去。翻那个 Notebook，我最想保留的是逐轮输出，能看到它刚拿到了什么、凭什么挑下一个动作。今天先拿一个能现场改结果的小例子跑起来，再去 pi 和 dsh 源码里找同样的一趟。 [GitHub 仓库分析 Notebook](https://github.com/TallMessiWu/react-agent/blob/main/agent.ipynb)
 
-今天就拿一条有记录可查的任务来看。DeepSeek Harness（后面简称 dsh）的仓库里有个叫 `fs-edit` 的测试案例，里面放了一份专门用来测试读写的 `config.txt`。录制里的用户指令翻成中文是：“先用 `read` 读这个文件，再用 `edit` 把 `DEBUG` 换成 `RELEASE`，不要用 bash，做完只回 `DONE`。”仓库把改之前的文件、改之后的文件，以及中间每次工具调用都留了下来。选这个例子，是因为我们可以把同一条任务交给 pi，再对着两边的记录看它们怎么跑。[测试文件和预期结果](https://github.com/deepseek-ai/deepseek-harness/tree/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit) · [用户指令和实际调用记录](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L10-L25)
+### 00:40　第 2 页　第 128 次 CI 为什么挂了？
 
-今天用同一次文件修改看两种做助手的办法。pi 先给我一个能用的循环，我沿着它找地方加功能。dsh 先读配置，把这一趟要用的循环、会话和工具服务装起来。等会儿看到同一个 edit，大家可以猜一下：我要改它的行为，动哪一块？
+我只说了“帮我看看，第 128 次 CI 为什么挂了”。没说哪个任务失败，也没给日志。我给助手两个工具：`list_jobs` 查一次构建有哪些任务，`read_log` 拿一个任务编号去查日志。先只跑上面这一格。
 
-先把用户刚才那句话放进一个列表，叫 `messages`，用它记每一轮的对话。下面先看循环跑起来以后发生什么。等讲到 pi，我们再打开`ask_model`，看框架在发出第一份请求前，还替用户准备了什么。
-
-```text
-def react(messages):
-    while True:
-        reply = ask_model(messages)
-        messages.append(reply)
-        if not reply.tool_call:
-            return reply.text
-        observation = run_tool(reply.tool_call)
-        messages.append(tool_result(reply.tool_call.id, observation))
+```python
+from presentation_labs import react_ci as ci
+messages = [{"role": "user", "content": ci.TASK}]
+call = ci.mock_llm(messages, ci.TOOLS)
+print("工具声明", ci.signatures(ci.TOOLS))
+print("模型回复", ci.describe(call))
 ```
 
-第一轮，`ask_model(messages)` 返回一个工具调用：读 `config.txt`。程序把这条回复记下来，这时模型给出的是 **Action**，它手上只有文件名。往下走到 `run_tool`，本地程序才打开文件。我们停在它的返回值 `observation` 上，看看刚才说的“观察”在这个例子里到底是什么。
+屏幕上出现 `list_jobs(run_id=128)`。到这儿模型只提出要查，我还答不上是构建挂了还是单测挂了。接着运行下面这一格。
 
-### 02:00　跟着 read 的结果走到第二次请求
-
-这就是 `fs-edit` 那份文件在修改前的两行正文：
-
-```ini
-mode=DEBUG
-level=info
+```python
+with ci.local_tools(tests_pass=False) as executors:
+    reader = executors[call["tool"]]
+    jobs = reader(**call["args"])
+    print("本地函数", reader.__qualname__)
+    print("读取结果", ci.short(jobs))
 ```
 
-第一行的 `DEBUG` 是用户要替换的值。第二行 `level=info` 要原样保留。大家留意一下，用户那句话里根本没提过 `level=info`。**如果我们在发给模型的数据里搜这串字，第一次会在哪一轮找到它？**
+现在 Python 根据工具名选中本机函数，查到两条记录。`build` 通过，编号 41；`unit-tests` 失败，编号 42。ReAct 里刚才点名调用的动作叫 action，拿回来的这组任务状态叫 observation。下一轮能填对 `read_log` 的编号，靠的就是这次返回。 [ReAct 作者的示例](https://react-lm.github.io/)
 
-> **投影**　指回循环末尾的 `messages.append(tool_result(...))`，再往上指到下一次 `ask_model(messages)`。
+### 03:00　第 3 页　全绿时还会去读日志吗？
 
-答案是第二次请求。本地的 `read` 先读到了这两行，循环最后一行把读取结果和调用 ID 放进 `messages`。回到循环顶部，模型才第一次看到完整的两行配置。它接着给出 `edit`，本地工具把 `mode=DEBUG` 改成 `mode=RELEASE`，另一行仍然是 `level=info`。再走一遍循环，这回送给模型的是修改成功的结果，它便按用户要求回复 `DONE`。这一轮是纯文本，伪代码就在 `return reply.text` 退出了。
+把刚才那两步放回循环。运行第 3 页，留意每轮打印的输入、模型回复和本地返回。这里的模拟模型只看刚收到的消息，按预写规则选动作。实际的工具函数去临时目录里读这次生成的任务和日志文件。
 
-<details>
-<summary>展开录制里的英文用户指令</summary>
+1. 默认 `tests_pass = False`，第一轮读到失败任务 #42。编号跟着 `messages.append(result)` 进入历史。
+2. 第二轮，模型提出 `read_log(job_id=42)`，日志返回 `FAIL test_invoice_total: expected 100, got 90`。第三轮才把这个结果答给用户。
+3. 现在把开关改成 `True`，问大家“这次会少哪一轮？”按 **Ctrl + Enter**。同样的用户任务，第一次工具返回却是全绿。第二轮直接给出结论，连 `read_log` 都没调用。
 
-```text
-First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE.
-```
+刚才我们能看见这两个分支，因为整个循环是自己写的。现在换成真正的 harness。我挑了 dsh 仓库的 `fs-edit` 测试：读 `config.txt`，把 `DEBUG` 换成 `RELEASE`，最后只答 `DONE`。用户原话、改前改后的文件和中间的工具回执都有记录，正好把同一道题交给 pi、dsh，再逐轮对照。 [测试文件和预期结果](https://github.com/deepseek-ai/deepseek-harness/tree/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit) · [测试录制](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L10-L25)
 
-</details>
+## 06:00–20:00　在 pi 里追一次文件修改
 
-附录 A 可以直接运行这段过程的回放。台上我们接着看真正的 harness：在伪代码里，把工具结果送回模型只用了一行 `append`。到了 pi，谁保存这条结果，又是谁把它拼进第二次请求？
+### 06:00　第 4 页　先看 pi 的源码架构
 
-## 04:00–20:00　pi：用户打的一句话，怎么变成三份请求？
-
-### 04:00　从用户按回车开始
-
-把进度拨回开头。现在我坐在终端前，交给 pi 的是这样一句话。这是本地命令行收到的英文任务原文：
-
-> First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE.
-
-我敲到这里就按回车了。后面大家会在请求里看到很多别的英文，先记住哪一句是我写的。pi 给这段输入标上来源：`role` 表示是谁说的，用户自己输入的就叫 `user`；`content` 装正文。这次正文只有一个文本块。这是从本地会话里**单独抽出的用户这一项**，保留开头一句供大家认出来：
-
-```json
-{
-  "role": "user",
-  "content": [{"type": "text", "text": "First use the read tool to read config.txt in the current directory. …"}]
-}
-```
-
-为了能逐项对照，我在本机跑这版 pi，保存它在发送前准备的会话消息和交给网络层的 JSON。模型的回答用预先准备的内容回放，读写文件由 pi 真正执行。
-
-按回车以后，先接到这项任务的是本机的 pi。从源码图里的 `AgentSession` 沿着 `Agent` 和 `runLoop` 走到 `pi-ai`，才到第一次向模型发请求的位置。前面伪代码里的 `ask_model(messages)`，正好把这里的准备工作藏起来了。
+刚才的 Python 有一张工具声明表，还有一份能执行的函数。换成 pi，这两样在哪里接起来？从“用户入口”进入，找到 `AgentSession`，再选“可用工具”，跟着一个 `read` 去注册表里走一个来回。
 
 图 1　pi CLI 的源码架构
 
@@ -208,13 +182,28 @@ flowchart TB
 
 </details>
 
-### 06:00　先看谁加了系统提示，再打开第一次请求
+### 08:00　第 5 页　第一轮发出之前，pi 已经拿到了什么？
 
-还是刚才那句话。假设我只把用户原文交给一个模型，它看得到“用 `read`”，却不知道我们这儿的 `read` 怎么叫、允许给什么参数。pi 手上还有两份材料可以补进去。
+图上的入口现在有了名字。先看投影左边，这才是用户在终端里输入的全部。
 
-一份是**给助手的工作说明**。为了看清项目约定怎么进模型，我在临时演示目录里放了一个 `AGENTS.md`，里面只写了一行：`Keep unrelated configuration values unchanged.`，意思是“只改这次要求改的配置项，其他项保持原样”。落到我们的文件，就是改 `mode`，保留 `level=info`。pi 准备首包时把这句约定和它自带的工作说明一起放进 `system`，用户在终端打的任务仍放在 `user`。这时模型已经知道要保留其他配置；具体还有哪几行，得等 `read` 把文件正文带回来。
+> First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE.
 
-另一份是**工具清单**。这次启动时给 pi 启用了 `read`、`edit`、`write` 和 `bash`。本地注册的工具各有名字、用法和执行函数。pi 需要把可调用的名字和用法告诉模型，真正打开文件的函数留在本机。
+我敲到这里就按回车了。后面大家会在请求里看到很多别的英文，先记住哪一句是我写的。pi 给这段输入标上来源：`role` 表示是谁说的，用户自己输入的就叫 `user`；`content` 装正文。这次正文只有一个文本块。这是从本地会话里**单独抽出的用户这一项**，保留开头一句供大家认出来：
+
+```json
+{
+  "role": "user",
+  "content": [{"type": "text", "text": "First use the read tool to read config.txt in the current directory. …"}]
+}
+```
+
+为了能逐项对照，我在本机跑这版 pi，保存它在发送前准备的会话消息和交给网络层的 JSON。模型的回答用预先准备的内容回放，读写文件由 pi 真正执行。
+
+再看右边那句英文，是我放进临时项目 `AGENTS.md` 的。里面只有一行，`Keep unrelated configuration values unchanged.`，意思是“只改这次要求改的配置项，其他项保持原样”。落到我们的文件，就是改 `mode`，保留 `level=info`。pi 准备首包时把这句约定和它自带的工作说明一起放进 `system`，用户在终端打的任务仍放在 `user`。这时模型已经知道要保留其他配置；具体还有哪几行，得等 `read` 把文件正文带回来。
+
+工具清单也有了。之前录正常请求时给 pi 启用了 `read`、`edit`、`write` 和 `bash`。本地注册的工具各有名字、用法和执行函数。pi 需要把可调用的名字和用法告诉模型，真正打开文件的函数留在本机。
+
+### 09:30　第 6 页　第一份请求里有没有文件内容？
 
 先停在**本地会话刚准备好、还没交给模型适配器**的地方。下面是从同一次回放取出的两条内部消息。第一条把工作说明按段保存：`preamble` 是开场指令，`project_context` 里包含项目约定。`toolsAdded` 记录首次声明的工具，例子里每项只展开名字。第二条还是刚才的用户输入。长字符串中的 `…` 表示投影时折叠的原文，完整数据在附件的 `pi.local_before_send[0]`。[pi 组装系统提示的源码](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/system-prompt.ts#L128-L189)
 
@@ -268,15 +257,7 @@ flowchart TB
 
 > **台上操作**　在同一份请求里找两处文字。`Keep unrelated` 能找到，因为项目约定已经被 pi 读入；`level=info` 找不到，因为要求操作的 `config.txt` 还没人读过。工具出现在清单里，只能说明它可用。
 
-### 10:00　第二次请求：模型说要读，谁把读出的内容送回去？
-
-先看这张完整时序图。第一条箭头是人按回车，最后一条箭头是人看到 `DONE`。此刻我们刚走完“第一次请求”，顺着模型的返回箭头往下看。
-
-从第一条箭头往下读：用户按回车后，pi 准备请求。模型先要求 `read`，再要求 `edit`，最后一条 `DONE` 回到终端。
-
-![pi 从用户输入到三次模型请求、两次本地工具执行，最终把 DONE 返回给用户](./pi-request-sequence.svg)
-
-[单独打开放大这张时序图](./pi-request-sequence.svg)
+### 11:30　第 7 页　第二份请求里多出了谁说的两句话？
 
 模型回的是一个动作：“请用 `read` 读取 `config.txt`。”这种回复在会话里的作者叫 `assistant`。它带一个调用编号 `fs-edit-read`，相当于给这次读取贴了一张回执号。等本地工具读完文件，pi 拿着同一个号，把两行正文记为工具结果。本地会话把这种结果叫 `toolResult`。先看新增的这两项，文件内容出现在哪一项？
 
@@ -331,7 +312,9 @@ flowchart TB
 
 这次 `level=info` 出现了。用户没有再打字，消息数却由 2 变成 4，因为中间有一项来自模型，一项来自工具。pi 每次发包会取当前会话分支走到这里的历史。同一分支的这个短任务里，我们实际看到第一轮的两条消息在第二轮原样保留。
 
-### 15:00　第三次请求：带进去的是新文件，还是工具的回执？
+台上可以直接切「连同前文」。这四项里，只有其中那条 user 是我敲的。现在模型既知道我要改什么，也知道文件当前是什么样子，下一步它选了 edit。
+
+### 12:45　第 8 页　第三份请求带回来的是写入回执
 
 模型看过原文，第二次回复选了 `edit`。它给了文件名、旧文本 `DEBUG` 和新文本 `RELEASE`。本地工具照这次调用去改文件，在会话里又添了一对：助手提出的 `edit`，以及写入成功的结果。这次的编号是 `fs-edit-replace`。如果用 `write`，模型就得给出整份要写入的内容；这里实际选的是 `edit`，只给一处替换。[本地 edit 及其返回值](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/tools/edit.ts#L181-L213)
 
@@ -383,21 +366,51 @@ flowchart TB
 
 它说“成功替换了一个文本块”。如果这时把鼠标往上移，前一轮 `read` 的结果居然还写着 `mode=DEBUG`。这两条可以同时成立：一条是更改前读到的旧内容，一条是之后写入的回执。如果用户还想看改完的完整文件，得再读一次；这条任务只要求改完回 `DONE`。
 
-### 18:00　把请求和响应接回用户
+切到「模型回复」，这才是最终回答。三份 JSON 都走过了，把它们放回一条时间线。
 
-现在第三份请求已发出，模型才给出最后一句回答。pi 收到纯文本 `DONE`，本轮没有工具要执行，终端把它显示给用户。图上最后那条回到“用户”的箭头，就是这个时刻。
+### 14:00　第 9 页　沿时序图回看刚才的三轮
+
+从终端上的 DONE 反着找一遍。它来自第三轮的模型回复；模型说任务完成，依据是末尾的 edit 成功回执；这次 edit 选中的旧片段，又是第一回 read 读出来的。图上可以点「读取文件」和「修改文件」，分别看程序调用和工具返回走哪条线。
+
+从第一条箭头往下读：用户按回车后，pi 准备请求。模型先要求 `read`，再要求 `edit`，最后一条 `DONE` 回到终端。
+
+![pi 从用户输入到三次模型请求、两次本地工具执行，最终把 DONE 返回给用户](./pi-request-sequence.svg)
+
+[单独打开放大这张时序图](./pi-request-sequence.svg)
 
 > **台上操作**　看附件里三份 `pi.requests` 的最后一条消息：第一次是用户任务，第二次是读到的文件，第三次是写入成功的回执。再问：“哪一份里有助手已经回答的 `DONE`？”用户任务里一开始就有这个词，可真正的答案属于第三次**响应**。它在最后一份请求发出时还没发生。
 
-停在表格最后一行。edit 说文件已经改好了，用户这时还没看到 DONE。中间还隔着一次模型请求。刚才是哪段程序把这条成功回执送回模型的？
+展开「三轮消息数与最后一条消息」就能看到 2、4、6。每执行一次工具，历史多出一对消息。这里刚好有个前提：第一次读到的旧片段，第二次真正去改时还在。要是我趁中间把它改了，pi 究竟会覆盖，还是会发现？
 
-## 20:00–34:30　对照 pi，看 dsh 的架构与工作流
+### 16:00　第 10 页　在 read 和 edit 之间，换掉磁盘上的旧值
 
-### 20:00　同一个任务交给 dsh，谁来跑这个循环？
+第 10 页现场启动新的 pi CLI。让它读临时文件，等第二份模型请求已经带上 read 的回执时，给 pi 的模拟响应先停一下。这个停点很重要：历史里的旧版本已经写定，而本地 edit 还没有收到执行指令。我们用代码格里的 Python 回调改磁盘，再让它继续。
 
-答案就是我们前面看到的 pi 循环。模型选了 edit，pi 调本地工具，把成功回执接到历史里，再问一次模型。等这次模型答了 DONE，这个任务才结束。在 pi 的源码里，Agent 直接调用内置的 runAgentLoop。假如团队想在改 config.txt 前多检查一下路径，就在工具执行前接一个扩展。连 edit 的实现也可以换；要自己决定整个循环怎么跑，就得另外搭主程序，或者改核心代码。[Agent 怎样进入 runAgentLoop](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L441-L453) · [同名工具覆盖内置实现](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/docs/extensions.md#L2358-L2364)
+```python
+from presentation_labs.pi_lab import run_pi_edit
+from presentation_labs.view_results import show_pi
 
-现在把完全相同的任务交给 dsh。用户还是要它先读、再改、最后回 DONE，所以还是得有一段程序负责这几轮。换个问题：dsh 启动时，怎么知道该用谁来跑？打开配置，能找到 dsh-agent-loop。它是默认的循环插件。我们也可以按 AgentFactory 接口写自己的插件，再让配置选用它。接下来看架构图，先找命令行入口把这句任务交给了谁。[默认配置列出工具、循环和文件服务](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/base/cordis.patch.yml#L524-L561) · [循环插件登记 Agent 工厂](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/index.ts#L328-L338) · [AgentFactory 的创建与恢复约定](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent/src/index.ts#L176-L220)
+interfere = True
+def change_file(path):
+    path.write_text("mode=STAGING\nlevel=info\n", encoding="utf-8")
+
+pi_trial = run_pi_edit(after_read=change_file if interfere else None)
+show_pi(pi_trial)
+```
+
+先让大家猜最终会留下哪个值，再运行。上次 read 的回执写着 DEBUG，此刻磁盘上已经是 STAGING。模拟模型仍按原提议调用 edit。pi 自己的文件工具重新读盘，找不到原片段，回了 `Could not find the exact text in config.txt.`。把这条错误塞进第三份请求时，模型还不晓得新值到底是什么。我们的模拟模型见到匹配失败才要求再读一遍，直到第四份请求才第一次看见 STAGING。现场表里的失败提示和两次读出的正文，都来自真正的文件工具。 [pi 读取文件并应用修改](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/tools/edit.ts#L178-L209) · [旧片段未找到时的回执](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/tools/edit-diff.ts#L295-L304)
+
+把 `interfere` 改回 `False` 再跑，临时文件会重新从 DEBUG 开始。这次匹配成功，文件落到 RELEASE，模拟模型收到成功回执就答 DONE。之前内嵌的三份 JSON 保留的是正常录制；台上启动的这两次有自己的任务、调用编号和历史，可以展开 `pi_trial["rounds"]` 看。既然不同回执会让同一个任务多跑一轮，那到了 dsh，负责跑这几轮的代码是谁提供的？
+
+## 20:00–34:30　在 dsh 里追同一个任务，再现场更换执行器
+
+### 20:00　第 11 页　同一个任务交给 dsh，谁来跑这个循环？
+
+在 pi 里，我们刚跟过这条调用链。模型选了 edit，pi 调本地工具，把成功回执接到历史里，再问一次模型。等这次模型答了 DONE，这个任务才结束。在 pi 的源码里，Agent 直接调用内置的 runAgentLoop。假如团队想在改 config.txt 前多检查一下路径，就在工具执行前接一个扩展。连 edit 的实现也可以换；要自己决定整个循环怎么跑，就得另外搭主程序，或者改核心代码。[Agent 怎样进入 runAgentLoop](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L441-L453) · [同名工具覆盖内置实现](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/docs/extensions.md#L2358-L2364)
+
+现在把之前正常读、改、答的 fs-edit 任务交给 dsh。用户还是要它先读、再改、最后回 DONE，所以还是得有一段程序负责这几轮。换个问题：dsh 启动时，怎么知道该用谁来跑？打开配置，能找到 dsh-agent-loop。它是默认的循环插件。我们也可以按 AgentFactory 接口写自己的插件，再让配置选用它。接下来看架构图，先找命令行入口把这句任务交给了谁。[默认配置列出工具、循环和文件服务](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/base/cordis.patch.yml#L524-L561) · [循环插件登记 Agent 工厂](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/index.ts#L328-L338) · [AgentFactory 的创建与恢复约定](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent/src/index.ts#L176-L220)
+
+### 21:00　第 12 页　dsh 的源码架构
 
 图 2　dsh headless 的源码架构
 
@@ -519,6 +532,8 @@ flowchart TB
 
 </details>
 
+### 22:45　第 13 页　一句用户任务怎么留下四条本地记录？
+
 现在打开 dsh 仓库里这次改 config.txt 的录制。刚才是沿图走，这次顺着记录找：第 5 行，用户的任务进入队列；第 10 行，准备第一步时，同一句话被记成一条用户消息。[原始会话记录，第 5–12 行](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L5-L12)
 
 先停在 `ReactLoopAgent` 准备第一步的位置。此时用户的输入已经有了。dsh 还要给这次请求补三样东西。**谁在工作、工具怎么用**，由框架和启用的工具提供说明；稍后你会在系统指令 `system` 里看见它们。**当前在哪里工作、有什么权限**，由 dsh 从这次会话取出来，写成一段环境提醒。**模型能选哪些工具**，由本地登记好的工具清单提供。它们跟用户输入拼在一起，才够模型开始工作。
@@ -574,7 +589,7 @@ flowchart TB
 
 第 9 行放系统指令。每段都有来源，比如框架身份、运行模式、`edit` 的用法；归档把长文本收到了配套文件，这里以 `{{system}}` 占位。第 10 行是用户自己打的原话。第 11 行同样记作 `user/message`，但来源写的是 `runtime-context`，也就是 dsh 补进去的运行环境。第 12 行登记这次用的模型和工具清单。到这一步，本地既知道一句话要带给模型，也知道这句话是谁加的。[归档的英文系统指令](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/text-turn/system-prompt.expected.md) · [归档的工具清单](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/text-turn/tool-schemas.expected.json)
 
-### 24:00　首包对照：同一个工作目录，两边从哪里带给模型？
+### 24:00　第 14 页　第一份模型请求把工作目录放在哪？
 
 现在把模型接口需要的 JSON 展开：`model` 指定模型，`system` 放工作说明，`messages` 放会话内容，`tools` 列它能调用的工具。下面三份 dsh 请求都用当时的消息和归档原文，交给当前源码的适配器在本机生成；原录制保留的是会话事件。我们主要对照消息角色和内容。[三份完整请求体](./harness-requests.json)
 
@@ -616,13 +631,7 @@ flowchart TB
 
 这个对照里有两个原因。**目录最初记到哪里**，由 harness 决定。**系统指令在 JSON 里用哪个字段**，还取决于选的模型接口：这里 pi 走 Chat Completions，dsh 走 DeepSeek Messages。两边的用户都没在任务里写出当前目录，两边也都能在第一轮把目录带给模型。[两份首包及发送前的记录](./harness-requests.json)
 
-### 27:00　同一次 read，pi 从当前分支取，dsh 从日志重建
-
-同样从用户按回车读起。留意文件工具读完后的那条返回线：结果先记进 dsh 的会话日志，下一次向模型发请求时才带上它。
-
-![dsh 从用户输入到三次模型请求、两次本地工具执行，最终把 DONE 返回给用户](./dsh-request-sequence.svg)
-
-[并排看 pi 的时序图](./pi-request-sequence.svg) · [放大 dsh 的时序图](./dsh-request-sequence.svg)
+### 25:30　第 15 页　第二份请求，读取结果在哪里？
 
 先把模型的回答和工具的回答分开看。第一轮模型发出的要求翻成口语就是“用 `read` 读 `config.txt`”。这次工具调用带着编号 `fs-edit-read`。dsh 把这句话登记成助手回复，再让本地文件工具去打开文件。工具读完，才出现第 17 行的 `tool/result`。它给出的正文里有路径和行号，可以找到下面这两行。[模型要求、工具执行和返回，第 15–18 行](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L15-L18)
 
@@ -683,9 +692,7 @@ flowchart TB
 
 > **投影**　沿日志第 17 行的 `level=info` 一路指到第二份请求最后一条消息，再把第 18 行的 `step/end` 也找一遍。`step/end` 留在本地帮助 dsh 记录进度。这样就能亲眼确认，会话记录里的内容是经过挑选才进入模型输入的。
 
-
-
-### 31:30　同一次 edit，谁有权写，谁知道已经写好？
+### 26:30　第 16 页　第三份请求，edit 成功之后模型看到什么？
 
 两个模型回复都要求在 `config.txt` 里把 `DEBUG` 换成 `RELEASE`，编号同为 `fs-edit-replace`。磁盘由本地工具改，这一步两边相同。把目标从当前目录换到另一个项目，就会碰到一个真正影响部署的差别。
 
@@ -754,17 +761,54 @@ pi 默认沿用启动进程的系统权限。dsh 在文件工具和磁盘之间�
 
 第三份请求发出以后，模型才回复 `DONE`。可以在会话记录第 25 行看到这条助手回复。它属于这次请求的返回值，下一行是步骤结束，再下一行是整轮结束。这样我们能在记录里把三个时刻分清：文件在第二轮工具执行时改变，模型在第三次请求里看见成功回执，用户随后看见 `DONE`。[最终回复和任务结束，第 25–27 行](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L25-L27)
 
+### 27:30　第 17 页　两次回执怎样从会话进入下一轮？
+
+三份请求放在一起，现在只追两条返回线。先点「读取文件」，工具系统把正文和调用编号写进会话，循环也拿到这一批工具已经完成的状态。再点「第二次请求」，这次才把正文从会话里取出来，让模型看到。修改成功的回执也是这么走到第三份请求的。
+
+![dsh 从用户输入到三次模型请求、两次本地工具执行，最终把 DONE 返回给用户](./dsh-request-sequence.svg)
+
+[并排看 pi 的时序图](./pi-request-sequence.svg) · [放大 dsh 的时序图](./dsh-request-sequence.svg)
+
 > **投影**　并排放三份请求，只读 `messages` 的最后一项，依次是“任务和提醒”“读取回执”“修改回执”。三份的 `system` 和工具清单相同，消息列表是 **1 → 3 → 5**。两个框架都在第二次请求才见到 `level=info`。
 
-### 33:00　为什么第一轮 pi 有两条消息，dsh 只有一条？
+### 29:00　第 18 页　为什么 pi 的 messages 总是多一条？
 
-看第 19 页。刚才我们只敲了一次回车，让它读 config.txt，再把 DEBUG 改成 RELEASE。框架自己也有话要交代。比如 pi 写了 `Use edit for targeted changes.`，意思是只改文件的一小处就用 edit。dsh 的说明里有一句以 `Read a file before editing it` 开头，讲的是编辑前先读文件。这些用工具的说明都写在系统提示词里。
+看左右两段首包。刚才我们只敲了一次回车，让它读 config.txt，再把 DEBUG 改成 RELEASE。框架自己也有话要交代。比如 pi 写了 `Use edit for targeted changes.`，意思是只改文件的一小处就用 edit。dsh 的说明里有一句以 `Read a file before editing it` 开头，讲的是编辑前先读文件。这些用工具的说明都写在系统提示词里。
 
 现在只数 `messages` 那对方括号里的条目。左边 pi 有两条，第一条标着 `system`，装的是框架的说明；第二条标着 `user`，才轮到我们那句话。右边 dsh 把说明放到了方括号外面，和 `messages` 并排。两个字段随同一份请求发给模型。这样，列表里就只有一条 `user`，把它展开能看到用户的原话和框架补的环境提醒。
 
-接下来的两轮很好数。每轮把刚才的工具调用和结果加进去，各多两条。所以 pi 是 2、4、6，dsh 是 1、3、5。接下来看 Plan Mode 时，可以继续盯着这份请求，看看开关一拨，框架又交代了什么。
+后面每做完一个工具都是多一对消息，所以 pi 为 2、4、6，dsh 为 1、3、5。这个实验里两个框架都请求模型三次，只是两种接口组织 system 的办法不一样。
+
+再问个不同的问题。刚才模型必须等第一份文件结果回来，再点第二个工具。要是规定第二个文件名只能从第一个文件里读出来，这中间必定要再问一次模型吗？
+
+### 30:00　第 19 页　两次 read 之间，一定要再问一次模型吗？
+
+回到开头的 CI，这回我只想知道第一个失败的测试名。工作区里有一份 `manifest.json` 和一份日志，日志的文件名每次运行时生成。两个执行器各拿一份内容相同的工作区，都只能用 `read` 读取文件。咱们不预填第二次读取的路径，让清单里的值真正决定后面的参数。
+
+先保留 `extra_info = 0` 运行。左边 native 的第一份请求中列了 read。模型提出读取清单，本地返回真实内容；模拟模型从真实回执取出日志路径，下一轮再提出读取日志，第三次请求才给出测试名。右边换成原厂 PTC（Programmatic Tool Calling）执行器，Agent 的循环和文件工具仍在。模型能直接调用的是 `run_code`，系统说明里给了程序内部可用的 TypeScript 工具签名。它一次交出这段程序。
+
+```ts
+const manifest = await tools.read({ file_path: 'manifest.json' })
+const log = await tools.read({ file_path: JSON.parse(manifest.lines[0].text).log })
+inspect(log.lines.find(line => line.text.startsWith('FAIL ')).text)
+```
+
+第一行拿到清单，第二行用清单的值读日志，两件事都在本地完成。第三行只把找到的失败行交给 `inspect`。等下一份请求发给模型，收到的是这次程序选出来的文本。台上看“实际读文件”和“模型请求”两列：前者两边都是两次，后者在这组预写策略下分别是三次和两次。两边的最终回答都是 `test_invoice_total`。 [默认执行器配置](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/base/cordis.patch.yml#L526-L535) · [PTC 生成声明及执行程序](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/tool-executor-ptc/src/index.ts#L24-L55)
+
+```python
+from presentation_labs.view_results import run_dsh_compare, show_dsh
+extra_info = 50
+dsh_trial = run_dsh_compare(extra_info)
+show_dsh(dsh_trial)
+```
+
+现在只改 `extra_info`，从 0 改成 50。磁盘上加了 50 行普通 INFO。先问大家，最后一份请求里的工具正文会跟着变长吗？再运行、对着表里的实际字符数回答。native 的 read 回执带着日志的行号、路径和正文，里面能找到 INFO。PTC 这段程序两次都只输出同一条 FAIL 行。字符数只统计最后一份请求的那条工具回执。PTC 的首包还要告诉模型怎么写程序、怎么调用 SDK，光看这个数字不能估整个任务的 token 或延迟。我们这台机器实跑 50 行时，native 的末次工具正文有 1,650 个字符，PTC 有 24 个。换台机器，临时路径长度可能不同，以代码格的实际输出为准。点开 `dsh_trial["native"]["requests"]` 和 `dsh_trial["ptc"]["requests"]`，就是这两趟发到本机模拟服务的真实请求。 [PTC 的 SDK 与 inspect](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/tool-executor-ptc/README.zh.md#L103-L135) · [read 返回的结构](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/tool-fs/src/read.ts#L78-L105)
+
+这次两边都用锁定的官方 `@deepseek-ai/dsh@0.2.3-alpha.2` headless 包真实执行，模型回复用本机服务模拟。跟图里刚看到的结构对一下：换执行器，首包声明和后续回执都会变。那如果只想“先给我看方案，再动手”，需要换整个执行器吗？我们回到文件修改，看看规划和权限各接在哪一道。
 
 ## 34:30–37:00　两边怎样用插件改变同一个循环？
+
+### 34:30　第 20 页　开了 Plan Mode，还能改文件吗？
 
 还是改 config.txt。先看 pi 的官方 Plan 扩展示例。打开规划，盯着从 AgentSession 发给模型的工具列表，`read` 还在，`edit` 和 `write` 消失了。如果模型选了 `bash`，pi 在运行命令前触发本地事件 `tool_call`。Plan 扩展监听这个事件，检查命令：`ls` 放行，`touch note.txt` 就拦住，把原因交回循环。[pi 怎样切换工具清单](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/examples/extensions/plan-mode/index.ts#L94-L118) · [Plan 扩展监听 tool_call](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/examples/extensions/plan-mode/index.ts#L167-L178)
 
@@ -774,7 +818,7 @@ pi 默认沿用启动进程的系统权限。dsh 在文件工具和磁盘之间�
 
 > **讲者备查**　第 20 页的路径演示采用 dsh 默认配置 `workspace-write + ask`，授权目录内可写，扩大范围可申请。前面回放用的是 `danger-full-access + never`，dsh 不限制文件路径，也不向人申请额外权限。两种配置下都受操作系统权限约束。 [新会话的默认权限](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/base/cordis.patch.yml#L243-L282) · [回放采用的权限](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L1-L4)
 
-### 35:30　同样的功能，两边要改哪一层？
+### 35:30　第 21 页　同样的功能，两边要改哪一层？
 
 先看「换文件后端」。假设 config.txt 在本机和 SSH 远端各有一份。两边的 edit 都已经改了远端那份。现在请模型调用附录里的另一个工具 `read_config` 来核对。大家猜，它读回来的是哪一份？
 
@@ -784,7 +828,9 @@ pi 默认沿用启动进程的系统权限。dsh 在文件工具和磁盘之间�
 
 最后点「换循环」。pi 把现成循环交给你扩展。真要整个换掉，就要自己搭主程序，或改核心。dsh 连默认循环都是启动配置选的插件。你可以换成自己写的，但得实现创建和恢复 agent 的接口，并让新工厂接替旧工厂。[pi 的 Agent 直接调用循环](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L439-L453) · [dsh 循环插件登记工厂](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/index.ts#L328-L338) · [同一注册表内的工厂约束](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent/src/index.ts#L377-L397)
 
-## 37:00–38:00　昨天的约定，今天怎么找回来？
+## 37:00–38:00　记忆插件
+
+### 37:00　第 22 页　昨天的约定，今天怎么找回来？
 
 昨天我们告诉助手：“记住，A 项目的发布说明用中文写。”今天开新会话，只让它写发布说明。这句“用中文”怎么回来？
 
@@ -841,7 +887,9 @@ pi 默认沿用启动进程的系统权限。dsh 在文件工具和磁盘之间�
 
 pi-memory 的正常退出流程若成功生成非空摘要，也会追加到当天的 daily 文件；默认切换会话时跳过这一步。[退出摘要写入](https://github.com/jayzeng/pi-memory/blob/v0.4.2/index.ts#L1465-L1517)　Hermes 表中是普通项目记忆。用户显式置顶的 STANDING.md 可以直接注入；普通项目条目的创建日期保存在条目元数据中。[默认提示策略](https://github.com/chandra447/pi-hermes-memory/blob/v0.11.0/src/prompt-context.ts#L36-L65) · [日期元数据](https://github.com/chandra447/pi-hermes-memory/blob/v0.11.0/src/store/memory-store.ts#L658-L675)　Remnic 图中是 /remnic-remember 指定的 fact 写入路径。服务观察到的原始对话转录另有按日的 JSONL 文件。[显式保存命令](https://github.com/joshuaswarren/remnic/blob/v9.69.56/packages/plugin-pi/src/index.ts#L350-L360) · [转录路径](https://github.com/joshuaswarren/remnic/blob/v9.69.56/packages/remnic-core/src/transcript.ts#L101-L132)
 
-## 38:00–40:00　给团队做助手，怎么选 pi 和 dsh？
+## 38:00–40:00　按团队场景选择
+
+### 38:00　第 23 页　给团队做助手，怎么选 pi 和 dsh？
 
 > **台上操作 · 38:00–40:00**　默认页挑“个人开发者”和“平台工程师”各举一例，随后点「同模型实测」。其余行和「按模型选」可在提问时展开。
 
@@ -881,61 +929,25 @@ pi-memory 的正常退出流程若成功生成非空摘要，也会追加到当�
 
 这份表来自 DeepSeek 在 2026 年 9 月 17 日提交的 V4.1-Flash 技术报告。作者固定模型权重、题目和解码配置，比较各套 harness 自带的提示词、工具和循环。推理强度为 100（Max），Linux 容器、温度 1.0、top-p 0.95、1M 上下文，每个 agent 最多 500 次模型生成。DeepSWE 每题采样 8 次，Terminal-Bench 每题 3 次，终端评测断网。pi 用 v0.84.2 的 RPC 模式，加文件、shell 和搜索工具。dsh Standard 用 v0.1.1+custom.202609011522 的完整 SDK 配置，起初 26 个函数工具；Minimal 只有 bash。要判断某个钩子或工具具体贡献了多少，需要单独做消融。其他模型也要按实际配置另测。 [技术报告 §5.3.4 表 4](https://arxiv.org/html/2609.19969v1#S5.SS3.SSS4) · [附录 B.1 的评测配置](https://arxiv.org/html/2609.19969v1#A2.SS1) · [官方模型卡](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/README.md)
 
-## 附录 A　一个可运行的 ReAct 工具循环
+## 附录 A　重跑 CI 的 ReAct 循环
 
-在 Python 3 里运行下面这一格。三个模型回复取自 dsh 的 `fs-edit` 录制，Python 在临时目录里实际读写 `config.txt`。第一条简短的 `system` 由这个演示程序自己加上；`tool`、`args` 和 `call_id` 是代码为了展示名字、参数和配对号选用的教学字段。打印时可以直接看到上一次工具返回的内容。两套框架的完整请求格式见[请求附件](./harness-requests.json)。
+在仓库根目录打开的 Notebook 里运行下面这格。`react_ci` 就是第 2、3 页用的本地实验模块。工具打开的是新建临时目录的任务清单和日志。模拟模型根据当轮最后一条消息、当时可用的声明来选择下一步动作。把 `tests_pass` 分别设为 `False` 和 `True`，对照是否调过 `read_log`。 [实验实现](./presentation_labs/react_ci.py)
 
 ```python
-import json
-from pathlib import Path
-from tempfile import TemporaryDirectory
-
-TASK = "First use the read tool to read config.txt in the current directory. Then use the edit tool (NOT bash) to replace the literal text DEBUG with RELEASE in that file. Then reply with exactly the single word DONE."
-INITIAL = "mode=DEBUG\nlevel=info\n"
-EXPECTED = "mode=RELEASE\nlevel=info\n"
-RECORDED = [
-    {"role": "assistant", "id": "fs-edit-read", "tool": "read",
-     "args": {"file_path": "config.txt"}},
-    {"role": "assistant", "id": "fs-edit-replace", "tool": "edit",
-     "args": {"file_path": "config.txt", "old_string": "DEBUG", "new_string": "RELEASE"}},
-    {"role": "assistant", "content": "DONE"},
-]
-
-def initial_messages():
-    return [
-        {"role": "system", "content": "You can use read and edit."},
-        {"role": "user", "content": TASK},
-    ]
-
-def local_tool(folder, name, args):
-    if args["file_path"] != "config.txt":
-        raise ValueError("演示只操作临时目录里的 config.txt")
-    path = Path(folder) / args["file_path"]
-    content = path.read_text(encoding="utf-8")
-    if name == "read":
-        return content
-    if name != "edit" or content.count(args["old_string"]) != 1:
-        raise ValueError("请检查工具名和要替换的原文")
-    path.write_text(content.replace(args["old_string"], args["new_string"]), encoding="utf-8")
-    return "config.txt 已修改"
-
-def run_loop(folder, messages, replies):
-    for reply in replies:  # 回放下一条已录制的模型回复
-        print("\n本次请求 messages =", json.dumps(messages, ensure_ascii=False))
-        print("模型回复 =", json.dumps(reply, ensure_ascii=False))
+from presentation_labs import react_ci as ci
+tests_pass = False
+with ci.local_tools(tests_pass=tests_pass) as executors:
+    messages = [{"role": "user", "content": ci.TASK}]
+    for turn in range(1, 5):
+        previous = messages[-1]
+        reply = ci.mock_llm(messages, ci.TOOLS)
         messages.append(reply)
         if "tool" not in reply:
-            return reply["content"]
-        result = local_tool(folder, reply["tool"], reply["args"])
-        messages.append({"role": "tool", "call_id": reply["id"], "content": result})
-    raise RuntimeError("回放已用完，仍未收到预期回复")
-
-with TemporaryDirectory() as folder:
-    path = Path(folder) / "config.txt"
-    path.write_text(INITIAL, encoding="utf-8")
-    final = run_loop(folder, initial_messages(), RECORDED)
-    assert final == "DONE" and path.read_text(encoding="utf-8") == EXPECTED
-    print("\n磁盘上的 config.txt\n" + path.read_text(encoding="utf-8"))
+            ci.show_turn(turn, previous, reply)
+            break
+        result = ci.run_tool(executors, reply)
+        messages.append(result)
+        ci.show_turn(turn, previous, reply, result)
 ```
 
 ## 附录 B　同一个 `read_config` 的两个注册入口（供会后查阅）
@@ -1014,12 +1026,17 @@ export function apply(ctx: Context) {
 
 > **源码**　[工具编写教程](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/docs/user/develop/basic/tool.zh.md#L9-L45) · [本地源码插件的 overlay 与启动](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/docs/user/develop/basic/index.zh.md#L46-L64) · [内置工具解析会话目录的实现](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/tool-fs/src/session-cwd.ts#L16-L24)
 
-## 附录 C　从项目环境启动 JupyterLab
+## 附录 C　在放映机上准备和启动（演讲前做一次）
 
-```bash
+需要 Git、uv、Node.js 和 npm。Python 环境由 uv 建好，现场使用 pi、dsh 的两页需提前安装 Node 依赖，版本按仓库 README。首次准备时联网下载依赖和已锁定的模型目录，运行演示时无需 API key。
+
+```sh
+git clone https://github.com/TallMessiWu/pi-presentation.git
 cd pi-presentation
-uv sync --locked
-uv run --locked jupyter lab
+uv sync --python 3.11
+uv run python -m presentation_labs.prepare
+uv run jupyter trust "从一个-agent-循环讲到-pi-和-dsh.ipynb"
+uv run jupyter lab "从一个-agent-循环讲到-pi-和-dsh.ipynb"
 ```
 
-项目用 `uv.lock` 固定依赖，Python 3.11 内核可以运行附录 A，不需要模型密钥。Notebook 放映使用 JupyterLab RISE，进入放映后仍可执行当前单元格。交互图可以嵌入可信单元格的 HTML 输出。放映时按图里的“上一步 / 下一步”切换高亮箭头和解释，幻灯片导航用于翻页。[RISE 用法](https://jupyterlab-contrib.github.io/rise.html)
+在 Windows 上先在 Notebook 里 **Run All Cells**，把当前版本的输出准备好。Windows / Linux 按 **Alt + R**，macOS 按 **Option + R** 进入放映，按 **S** 打开演讲者窗口。在第 2、3、10、19 页点进代码格，用 **Ctrl + Enter** 原地执行。架构图和时序图用图内的“上一步 / 下一步”移动高亮，切换幻灯片则用左右方向键。 [项目运行说明](./README.md) · [RISE 用法](https://jupyterlab-contrib.github.io/rise.html)
