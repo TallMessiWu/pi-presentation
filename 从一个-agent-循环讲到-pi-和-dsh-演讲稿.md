@@ -58,7 +58,7 @@
 
 为了能逐项对照，我在本机跑这版 pi，保存它在发送前准备的会话消息和交给网络层的 JSON。模型的回答用预先准备的内容回放，读写文件由 pi 真正执行。
 
-按回车以后，先接到这项任务的是本机的 pi。从源码图里的 `AgentSession` 沿着 `Agent` 和 `runLoop` 走到 `pi-ai`，才到第一次向模型发请求的位置。前面手动演示里，Cell 3 一行 `build_request(messages, tools)` 就备好了请求。换到 pi，咱们沿这条路看看准备工作具体落在哪几个模块。
+按回车以后，先接到这项任务的是本机的 pi。从源码图里的 `AgentSession` 沿着 `Agent`、`runAgentLoop` 和 `runLoop` 走到 `pi-ai`，才到第一次向模型发请求的位置。前面手动演示里，Cell 3 一行 `build_request(messages, tools)` 就备好了请求。换到 pi，咱们沿这条路看看准备工作具体落在哪几个模块。
 
 图 1　pi CLI 的源码架构
 
@@ -71,9 +71,11 @@
 1. **选工具时，注册表 → AgentSession。** 这次命令行把 `read,edit,write,bash` 这四个**名字**交给会话。注册表就在 `AgentSession` 自己里面：会话按名调用 `_toolRegistry.get("read")`，拿回带有 `execute` 的 `read` 对象。四个名字逐个取完，**会话把选好的对象组成列表，写进 `agent.state.tools`**。图上的“返回：该名称的工具对象”就是这一趟的回程。[CLI 启用名单](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/sdk.ts#L280-L294) · [按名取对象](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L1671-L1677) · [写入工具列表](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L1710-L1717)
 2. **每轮发包前，agent.state.tools → AgentSession → runLoop。** 循环调用 `prepareRequest`，由会话从当前分支取历史，再用 `this.agent.state.tools.slice()` 取一份当前工具列表。它把两样东西一起装进本轮上下文，交回循环。因此图上有两根相接的长虚线：“每轮读回工具列表副本”指向会话，“本轮消息和工具副本”从会话指向循环。[会话准备并返回上下文](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L852-L879) · [循环取回上下文](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L228-L251)
 
-图里还有一条从 `agent.state.tools` 通向循环的线。启动循环时，`Agent` 会先取一份包含工具的快照，循环用它记录工具声明；上面第 2 步的回流线，画的是每轮发送前会话再取当前工具列表。两处读取的是同一份 Agent 状态。[启动循环时取快照](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L441-L473)
+在「循环」里看首轮声明从哪里来。启动时，`Agent` 先取一份包含消息和工具的快照。它调用 `runAgentLoop`，后者用 `declareToolChanges` 把工具声明记进系统消息，再启动 `runLoop`。往后的步骤也会按需记录工具声明的变更。[启动时取快照](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L441-L473) · [记录首轮声明](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L111-L134) · [后续步骤记录变更](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L191-L228)
 
-到了模型那一侧，用第一份请求里的 `tools[0].function` 对照：名字是 `read`，带有用途说明和路径参数 `path`。`pi-ai` 把消息中记录的声明放进出站的 `tools`。模型回了 `read` 这个名字后，分派层再到本轮的工具集合里查找并执行。`execute` 一直留在本机。[声明如何记录](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L333-L369) · [发送工具声明](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/ai/src/api/openai-completions.ts#L847-L849) · [模型点名后执行](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L721-L738)
+到了模型那一侧，用第一份请求里的 `tools[0].function` 对照。名字是 `read`，带有用途说明和路径参数 `path`。`pi-ai` 把消息中记录的声明放进出站的 `tools`。模型回了 `read` 这个名字后，分派在本轮 `context.tools` 里按名取到选中的对象，再调用本地实现的 `execute`。[发送工具声明](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/ai/src/api/openai-completions.ts#L787-L849) · [按名查找并验证参数](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L708-L738) · [调用本地实现](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L824-L847)
+
+切到「扩展接在哪里」。分派调用会话装好的回调，由 `ExtensionRunner` 运行扩展。执行前的 `tool_call` 可以拦住调用，执行后的 `tool_result` 可以改写回执。这样就能在后面的 `edit` 示例里指出检查发生在哪一条线上。[会话装配回调](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L709-L765) · [执行后应用处理结果](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L862-L899)
 
 先找 `runLoop`。沿实线看谁调用谁，沿标有返回内容的长虚线逆向读。短点线 `message_end` 表示会话订阅的事件。Notebook 的「突出回流」会保留结果与记历史的路径，淡化普通调用。
 
@@ -82,7 +84,7 @@
 - **终端怎么拿到 `DONE`？** `runPrintMode` 等待任务完成，再读取 `session.state.messages` 的最后一条助手文本，写到标准输出。[print 模式读取最终结果](https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/modes/print-mode.ts#L137-L158)
 
 <details>
-<summary>展开原版 Mermaid 架构图及源码入口</summary>
+<summary>展开 Mermaid 架构图及源码入口</summary>
 
 ```mermaid
 ---
@@ -120,24 +122,29 @@ flowchart TB
     boot <-->|创建并取得会话| sdk
     boot --> mode
   end
-  subgraph Session["coding-agent · 会话、提示词与本地工具"]
+  subgraph Session["coding-agent · 会话、扩展与工具"]
     sess["AgentSession · prompt / _prepareRun"]
     load["DefaultResourceLoader<br/>项目指令、扩展与 skills"]
     prompt["system-prompt.ts<br/>buildSystemPromptSections"]
-    hist["SessionManager<br/>会话树、消息与上下文投影"]
-    defs["工具注册表 · _toolRegistry<br/>内置 read / edit / write 等 + 扩展工具"]
-    load -->|提供 prompt 输入| sess
+    hist["SessionManager<br/>会话树与消息投影"]
+    defs["工具注册表 · _toolRegistry<br/>内置与扩展工具"]
+    hooks["ExtensionRunner<br/>tool_call / tool_result"]
+    fileTool["本地工具实现<br/>read / edit · execute"]
+    sess <-->|读取 / 返回项目资料| load
     sess <-->|构建 / 返回系统指令段| prompt
-    sess -->|记消息 / 读取当前分支| hist
+    sess -->|记消息 / 取当前分支| hist
     sess -->|① 登记 / ② 按名查找| defs
+    sess <-->|调用扩展 / 取回处理结果| hooks
   end
   subgraph Core["agent-core · 调度"]
-    toolset["本轮可用工具 · agent.state.tools<br/>本例 read / edit / write / bash"]
+    toolset["启用的工具 · agent.state.tools<br/>本例 read / edit / write / bash"]
     agent["Agent · runPromptMessages"]
+    entry["runAgentLoop<br/>declareToolChanges"]
     loopNode["agent-loop.ts · runLoop"]
-    dispatch["prepareToolCall / executePreparedToolCall"]
-    agent --> loopNode
-    loopNode -->|模型点名 read + 参数| dispatch
+    dispatch["prepareToolCall / executePreparedToolCall<br/>在本轮 context.tools 中按名查找"]
+    agent -->|传入工具与消息快照| entry
+    entry -->|启动 runLoop| loopNode
+    loopNode -->|④ 工具调用 + 本轮上下文| dispatch
   end
   subgraph Network["pi-ai · 模型协议"]
     route["ModelRuntime.streamSimple"]
@@ -148,27 +155,28 @@ flowchart TB
   sdk -->|传入 Agent 与启用名单| sess
   mode -->|提交任务 / 结束后读状态| sess
   sess -->|agent.prompt| agent
-  loopNode -->|③ 消息带工具声明| route
+  loopNode -->|③ 消息含工具声明| route
+  entry -.->|首轮：记录系统与用户消息| agent
   loopNode -.->|事件：message_end| agent
-  agent -.->|事件：通知会话写历史| sess
-  dispatch -->|④ 调用选中实现的 execute| defs
-  defs -->|本地文件操作| fs["文件系统"]
+  agent -.->|通知会话写历史| sess
+  dispatch -->|调用选中工具的 execute| fileTool
+  dispatch <-->|beforeToolCall / afterToolCall| sess
+  fileTool -->|本地文件操作| fs["文件系统"]
   api -->|③ tools 数组：名称、说明、参数| model["模型端点"]
   model -.->|返回：SSE 增量| api
   api -.->|返回：助手事件流| route
   route -.->|返回：工具调用或文本流| loopNode
-  fs -.->|返回：文件字节 / 写入完成| defs
-  defs -.->|返回：正文 / 修改回执| dispatch
-  dispatch -.->|回流：批次整理为 toolResult| loopNode
+  fs -.->|返回：文件字节 / 写入完成| fileTool
+  fileTool -.->|返回：正文 / 修改回执| dispatch
+  dispatch -.->|返回：整理为 toolResult| loopNode
   hist -.->|返回：当前分支消息| sess
   loopNode -->|每轮 prepareRequest| sess
   sess -.->|返回：本轮消息和工具副本| loopNode
-  sess -.->|读得最终助手文本 DONE| mode
+  sess -.->|返回：最终助手文本 DONE| mode
   defs -.->|② 返回：该名称的工具对象| sess
   sess -->|② 写入已选工具列表| toolset
   toolset -.->|③ 每轮读回工具列表副本| sess
-  toolset -->|③ 由循环提取声明| loopNode
-  toolset -->|④ 供分派按名查找| dispatch
+  toolset -->|启动时取工具快照| agent
   click sdk href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/sdk.ts#L403" "打开固定版本源码"
   click sess href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L2011" "打开固定版本源码"
   click loopNode href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L189" "打开固定版本源码"
@@ -176,7 +184,11 @@ flowchart TB
   click api href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/ai/src/api/openai-completions.ts#L787" "打开固定版本源码"
   click defs href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/tools/edit.ts#L180" "打开固定版本源码"
   click toolset href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L1669" "启用本轮工具"
-  linkStyle 19,20,21,22,23,24,25,27,28,29,31 stroke:#444444,stroke-width:1.65px,stroke-dasharray:7 4;
+  click agent href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent.ts#L441" "打开固定版本源码"
+  click entry href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/agent/src/agent-loop.ts#L111" "打开固定版本源码"
+  click hooks href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/agent-session.ts#L709" "打开固定版本源码"
+  click fileTool href "https://github.com/earendil-works/pi/blob/8209929fb553e7a8c91dc0894569f9ec43dd201f/packages/coding-agent/src/core/tools/read.ts" "打开固定版本源码"
+  linkStyle 23,24,25,26,27,28,29,31,32,33,35 stroke:#444444,stroke-width:1.65px,stroke-dasharray:7 4;
 ```
 
 </details>
@@ -378,13 +390,19 @@ flowchart TB
 
 [并排看 pi 的架构图](./pi-architecture.svg) · [放大 dsh 的架构图](./dsh-architecture.svg)
 
-> **台上操作**　选「循环由谁提供」，从 headless 的 `agents.create` 沿线找到默认的 `ReactLoopAgent`。现在回到任务开头：用户让它先读 config.txt，模型第一轮怎么知道有 `read` 可选？切到「可用工具」。
+> **台上操作**　选「循环由谁提供」。先看 profile 装载 `dsh-agent-loop` 的点线，再看插件通过 `agents.setFactory` 登记自己。接到任务以后，headless 调用 `agents.create`，`Agents` 再请已登记的工厂创建 `ReactLoopAgent`，把实例交给 headless。[工厂登记](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/index.ts#L328-L336) · [调用工厂](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent/src/index.ts#L413-L431)
+
+再选「用户入口」。headless 拿到实例后调用 `followup`。原话先进 `Inbox`，留下 `agent/inbox/spliced`。`preStep` 取出任务，`step` 再把它写成 `user/message`。同一句话先后出现在这两个事件里，归档第 5 行和第 10 行正好能对上。现在回到模型还没见过文件的时候，切到「可用工具」。[入队和取出](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L168-L179) · [归档中的两条记录](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/snapshots/session/fs-edit/session.v4.jsonl#L5-L10)
 
 跟 pi 一样，模型在本次请求的 `tools` 中看见工具；dsh 的区别在于，**每一步从当前配置装载的插件中确定可用工具集**。
 
 1. **登记、选用。** 这个 headless profile 装入了文件工具插件。插件启用 `read` 时向工具服务登记名字、说明、参数和执行函数；进入一个模型步骤时，循环调用 `tools.resolve`，得到这一步的 `toolSet`。[文件插件注册 read](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/tool-fs/src/read.ts#L67-L84) · [本步选择工具集](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L286-L303)
 2. **发给模型。** 请求组装沿用这份集合，把工具声明交给 `buildRequest`。归档的这次任务有 **24 项工具声明**；在 DeepSeek Messages 请求的顶层 `tools` 找 `name: "read"`，旁边就是 `description` 和 `input_schema`，路径参数在这里叫 `file_path`。24 是这次录制的数量，换配置可以得到另一份清单。[收集工具声明](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/system-prompt/src/index.ts#L757-L769) · [出站工具字段](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/llm/llm-deepseek/src/serialize.ts#L159-L167)
 3. **在本机执行。** 模型回复 `tool_use`，名字为 `read`。循环把模型给的调用和**刚才选出的同一份 `toolSet`** 交给工具执行器，按名找到本地实现，再走本次调用的参数和策略检查。[把原工具集交给执行器](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L576-L583)
+
+切到「每步组包」。循环先调用 `LlmRuntime.prepareCall` 确定适配器和配置，再进入 `buildRequest`。组包时按需写入 `request/header` 和 `request/context`，然后用 `deriveMessages()` 取模型要看的历史。请求回到循环，再由准备好的调用句柄发送。[准备适配器再组包与发送](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L431-L485) · [会话里记录请求再取消息](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L645-L733)
+
+切到「文件服务由谁提供」。`read` 和 `edit` 都从 `tool-fs` 走到同一个 `ctx.fs`。默认 profile 在这里用 `fs-sandbox`。读取沿用 `LocalFileSystem` 的实现，修改先经 `checkedTarget` 检查路径，再由继承的 `editText` 改文件。[工具调用 ctx.fs](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/tool-fs/src/read.ts#L138-L148) · [文件服务的继承与修改检查](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/fs-sandbox/src/index.ts#L47-L108)
 
 回到 `ReactLoopAgent`，沿长虚线读返回的数据；带「注册」的短点线是启动时的关系，`tool/result` 则是工具系统向会话追加的事件。准备阶段的双向箭头分别列出请求的动作和取回的材料。
 
@@ -393,7 +411,7 @@ flowchart TB
 - **终端怎么拿到 `DONE`？** headless 等会话空闲、刷新日志，再从本轮记录里取出最后的助手文本并打印。[headless 读取最终结果](https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/headless/src/index.ts#L418-L437)
 
 <details>
-<summary>展开原版 Mermaid 架构图及源码入口</summary>
+<summary>展开 Mermaid 架构图及源码入口</summary>
 
 ```mermaid
 ---
@@ -424,58 +442,78 @@ config:
     padding: 11
 ---
 flowchart TB
-  CLI["apps/cli · headless profile"] --> RUN["headless.run · agents.create / agent.followup"]
+  CLI["apps/cli · headless / base profile"] --> RUN["headless.run"]
+  AGENTS["core/agent · Agents<br/>持有当前 AgentFactory"]
   subgraph Agent["core/agent-loop"]
-    DRIVER["ReactLoopAgent · turn / preStep / step"]
-    BUILD["buildRequest · 产生 GenerateOptions"]
+    FACTORY["dsh-agent-loop · AgentLoop<br/>实现 AgentFactory"]
+    DRIVER["ReactLoopAgent<br/>followup / preStep / step"]
+    INBOX["ReactLoopInbox<br/>next-turn / next-step"]
+    BUILD["buildRequest<br/>产生 GenerateOptions"]
+    FACTORY -->|创建会话和 Agent| DRIVER
+    DRIVER <-->|followup 入队 / preStep 取出| INBOX
+    DRIVER --> BUILD
   end
-  RUN --> DRIVER
+  CLI -.->|profile 装载循环插件| FACTORY
+  FACTORY -.->|agents.setFactory| AGENTS
+  RUN -->|agents.create| AGENTS
+  AGENTS -->|调用 factory.createAgent| FACTORY
+  AGENTS -.->|返回：AgentHandle| RUN
+  RUN -->|agent.followup 提交任务| DRIVER
   subgraph Input["选择本步能力与上下文"]
-    TOOLS["工具注册表 · core/tools<br/>resolve → 本步 ResolvedToolSet"]
-    PROMPT["core/system-prompt · assemble / systemUpdates"]
-    CTX["RuntimeContextProjection · project"]
+    TOOLS["core/tools<br/>resolve → ResolvedToolSet"]
+    PROMPT["core/system-prompt<br/>assemble / systemUpdates"]
+    CTX["RuntimeContextProjection<br/>project"]
   end
   DRIVER <-->|② resolve 选出本步工具集| TOOLS
   DRIVER <-->|组装 / 本步提示| PROMPT
-  DRIVER <-->|读取 / 环境更新| CTX
-  DRIVER --> BUILD
+  DRIVER <-->|投影 / 环境更新| CTX
   subgraph State["core/session"]
-    LOG["Session.append · 有序事件"]
-    VIEW["Session.deriveMessages · 当前消息历史"]
+    LOG["Session.append / eventAt<br/>有序事件"]
+    VIEW["Session.deriveMessages<br/>当前消息历史"]
+    LOG -->|投影消息事件| VIEW
   end
-  DRIVER -->|追加指令、用户与助手消息| LOG
-  LOG --> VIEW
+  INBOX -->|记录 agent/inbox/spliced| LOG
+  DRIVER -->|追加系统、用户与助手消息| LOG
+  BUILD -->|按需记 request/header、request/context| LOG
   BUILD -->|取本步对话历史| VIEW
   subgraph Provider["模型服务路径"]
-    LLM["LlmRuntime.prepareCall / stream"]
-    WIRE["llm-deepseek · serialize / fetch / translate"]
+    CALL["LlmRuntime.prepareCall<br/>确定配置与适配器"]
+    LLM["PreparedLlmCall.stream"]
+    WIRE["llm-deepseek<br/>serialize / fetch / translate"]
     NET["DeepSeek Messages API"]
+    LLM --> WIRE -->|③ tools：name、description、input_schema| NET
   end
-  DRIVER -->|带工具声明的请求| LLM --> WIRE -->|③ tools 数组：name、description、input_schema| NET
+  DRIVER <-->|组包前：解析配置 / 返回调用句柄| CALL
+  DRIVER -->|组包后：发送请求| LLM
   subgraph Local["文件操作路径"]
-    EXEC["ToolsService.execute · 工具策略 / native executor"]
+    EXEC["ToolsService.execute<br/>工具策略 / native executor"]
     FS["tool-fs · read / edit"]
-    GUARD["fs-sandbox · editText / checkedTarget"]
-    DISK["fs-local · readText / editText"]
+    FSSVC["ctx.fs · SandboxedFileSystem"]
+    GUARD["editText · checkedTarget"]
+    DISK["LocalFileSystem<br/>继承的 readText / editText"]
+    EXEC -->|④ 按名执行 read 或 edit| FS
+    FS -->|read / edit 都调用同一服务| FSSVC
+    FSSVC -->|read：使用继承实现| DISK
+    FSSVC -->|edit：先检查路径| GUARD
+    GUARD -->|授权后 super.editText| DISK
   end
-  DRIVER -->|④ 模型返回的名字 + 本步工具集| EXEC -->|④ 按名执行 read 或 edit| FS
-  FS -->|"只读"| DISK
-  FS -->|"修改"| GUARD -->|授权后委托写入| DISK
-  FS -.->|"① register：声明和执行函数"| TOOLS
-  FS -.->|"注册工具使用说明"| PROMPT
-  EXEC -->|"写入事件：tool/result"| LOG
+  DRIVER -->|④ 模型调用 + 本步工具集| EXEC
+  FS -.->|① register：声明和执行函数| TOOLS
+  FS -.->|注册工具使用说明| PROMPT
+  EXEC -->|记录 tool/call、tool/result| LOG
   NET -.->|返回：SSE 事件| WIRE
   WIRE -.->|返回：StreamChunk 流| LLM
   LLM -.->|返回：流片段由循环组装| DRIVER
-  DISK -.->|返回：读取的正文| FS
-  DISK -.->|返回：修改结果| GUARD
-  GUARD -.->|返回：修改结果| FS
-  FS -.->|返回：文件工具执行值| EXEC
+  DISK -.->|返回：正文 / 修改结果| FSSVC
+  FSSVC -.->|返回：文件操作结果| FS
+  FS -.->|返回：工具执行结果| EXEC
   EXEC -.->|返回：批次状态 / 附加上下文| DRIVER
   VIEW -.->|返回：本步消息列表| BUILD
   BUILD -.->|返回：组好的模型请求| DRIVER
-  LOG -.->|读日志得到 DONE| RUN
+  RUN -->|flush 后读取本轮事件| LOG
+  LOG -.->|返回：本轮事件（含 DONE）| RUN
   CLI -.->|① profile 装载 tool-fs| FS
+  CLI -.->|profile 挂载 fs-sandbox| FSSVC
   TOOLS -->|② 经 preStep 提供本步工具集| PROMPT
   PROMPT -->|③ 经 step 传入 assembly.tools| BUILD
   click RUN href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/bundle/headless/src/index.ts#L385" "打开固定版本源码"
@@ -487,7 +525,15 @@ flowchart TB
   click GUARD href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/fs-sandbox/src/index.ts#L153" "打开固定版本源码"
   click TOOLS href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/tools/src/index.ts#L110" "本地工具和模型可见声明"
   click PROMPT href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/system-prompt/src/index.ts#L757" "生成本轮工具声明"
-  linkStyle 20,21,22,23,24,25,26,27,28,29,30 stroke:#444444,stroke-width:1.65px,stroke-dasharray:7 4;
+  click AGENTS href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent/src/index.ts#L388" "打开固定版本源码"
+  click FACTORY href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/index.ts#L328" "打开固定版本源码"
+  click INBOX href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/inbox.ts#L108" "打开固定版本源码"
+  click LOG href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/session/src/index.ts#L536" "打开固定版本源码"
+  click CALL href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/llm/llm/src/index.ts#L942" "打开固定版本源码"
+  click LLM href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/core/agent-loop/src/agent.ts#L469" "打开固定版本源码"
+  click FSSVC href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/fs-sandbox/src/index.ts#L47" "打开固定版本源码"
+  click DISK href "https://github.com/deepseek-ai/deepseek-harness/blob/4b399c39a6d1479cd84ca591b4d7c88e24d38a96/packages/fs/fs-local/src/index.ts#L190" "打开固定版本源码"
+  linkStyle 8,31,32,33,34,35,36,37,38,39,41 stroke:#444444,stroke-width:1.65px,stroke-dasharray:7 4;
 ```
 
 </details>
